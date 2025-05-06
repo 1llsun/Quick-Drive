@@ -20,3 +20,81 @@ import platform
 from pathlib import Path
 from functools import wraps
 from collections import deque
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Constants
+CACHE_FILE = Path.home() / '.quickdrive_cache.pkl'
+SCOPES = ['https://www.googleapis.com/auth/drive']
+EXPORT_FORMATS = {
+    'application/vnd.google-apps.document': [
+        ('application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx', 'Microsoft Word'),
+        ('application/pdf', '.pdf', 'PDF')
+    ],
+    'application/vnd.google-apps.spreadsheet': [
+        ('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx', 'Microsoft Excel'),
+        ('application/pdf', '.pdf', 'PDF')
+    ],
+    'application/vnd.google-apps.presentation': [
+        ('application/vnd.openxmlformats-officedocument.presentationml.presentation', '.pptx', 'Microsoft PowerPoint'),
+        ('application/pdf', '.pdf', 'PDF')
+    ]
+}
+
+def retry_on_rate_limit(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        retries = 3
+        for attempt in range(retries):
+            try:
+                return func(*args, **kwargs)
+            except HttpError as e:
+                if e.resp.status == 403 and 'rate limit' in str(e).lower():
+                    if attempt < retries - 1:
+                        wait_time = 2 ** attempt
+                        logging.warning(f"Rate limit hit, retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                raise
+        raise HttpError("Max retries reached for rate limit", resp={'status': 429})
+    return wrapper
+
+class QuickDriveApp:
+    def _init_(self, root):
+        self.root = root
+        self.root.title("QuickDrive")
+        self.root.geometry("1000x750")
+        self.service = None
+        self.file_list = {}
+        self.is_dark_theme = True  # Start with dark theme
+        self.offline_cache = {}
+        self.current_folder_id = 'root'
+        self.folder_stack = deque([('My Drive', 'root')])
+        self.selected_files_count = 0
+        self.style = Style(theme='darkly')
+        self.setup_credentials()
+        self.create_gui()
+        self.load_offline_cache()
+
+    def setup_credentials(self):
+        creds = None
+        try:
+            if os.path.exists('token.json'):
+                creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                else:
+                    if not os.path.exists('credentials.json'):
+                        raise FileNotFoundError("credentials.json not found")
+                    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                    creds = flow.run_local_server(port=0)
+                with open('token.json', 'w') as token:
+                    token.write(creds.to_json())
+            self.service = build('drive', 'v3', credentials=creds)
+        except Exception as e:
+            logging.error(f"Authentication error: {str(e)}")
+            messagebox.showerror("Authentication Error", f"Failed to authenticate: {str(e)}")
+            raise
+
